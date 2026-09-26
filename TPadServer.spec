@@ -8,7 +8,9 @@ a = Analysis(
     ['server.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('宝剑1.jpg', '.'),
+    ],
     hiddenimports=[
         'pynput.mouse._win32',
         'pynput.keyboard._win32',
