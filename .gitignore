@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+*.manifest
+
+# PyInstaller
+*.spec.bak
+build/
+dist/
+
+# 虚拟环境
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+Thumbs.db
+.DS_Store
+Desktop.ini
+$RECYCLE.BIN/
+
+# 运行时生成文件
+ble_log.txt
+server_config.json
+transform_image.jpg
+*.log
+
+# 下载产物
+downloads/
