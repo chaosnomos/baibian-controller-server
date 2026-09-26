@@ -114,16 +114,16 @@ chmod +x build_macos.sh
 
 不想自己编译的用户，可以直接下载预编译版本：
 
-- [V1.3.0 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/v1.3.0)
+- [V1.3.1 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/v1.3.1)
 
 下载后可用以下命令验证文件完整性（防篡改）：
 ```powershell
 Get-FileHash .\TPadServer.exe -Algorithm SHA256
 ```
 
-**SHA256（V1.3.0）：**
+**SHA256（V1.3.1）：**
 ```
-CA423D0C516BD83ACA9367962884109C46A39071450F17B3336CB6B05E030979
+B67F64D86011982506682A84CB4891FEED6CE23EF2EEEA97A96AB902E1AE5129
 ```
 
 ## 生成安装包（可选）
