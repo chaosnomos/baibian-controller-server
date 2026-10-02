@@ -4,9 +4,9 @@
 
 [Setup]
 AppName=TPad Server
-AppVersion=1.0.0
+AppVersion=1.4.1
 AppPublisher=TPad
-AppPublisherURL=https://github.com/tpad
+AppPublisherURL=https://github.com/chaosnomos/baibian-controller-server
 AppDescription=TPad 蓝牙/WiFi 远程控制服务器
 DefaultDirName={pf}\TPadServer
 DefaultGroupName=TPad Server
@@ -17,7 +17,7 @@ Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64
-UninstallDisplayIcon={app}\TPadServer.exe
+UninstallDisplayIcon={app}\BaibianController-Server.exe
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
@@ -28,20 +28,20 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Name: "startup"; Description: "开机自启动"; GroupDescription: "附加图标:"; Flags: unchecked
 
 [Files]
-Source: "dist\TPadServer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\BaibianController-Server.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\TPad Server"; Filename: "{app}\TPadServer.exe"
+Name: "{group}\TPad Server"; Filename: "{app}\BaibianController-Server.exe"
 Name: "{group}\卸载 TPad Server"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\TPad Server"; Filename: "{app}\TPadServer.exe"; Tasks: desktopicon
-Name: "{commonstartup}\TPad Server"; Filename: "{app}\TPadServer.exe"; Tasks: startup
+Name: "{commondesktop}\TPad Server"; Filename: "{app}\BaibianController-Server.exe"; Tasks: desktopicon
+Name: "{commonstartup}\TPad Server"; Filename: "{app}\BaibianController-Server.exe"; Tasks: startup
 
 [Run]
-Filename: "{app}\TPadServer.exe"; Description: "立即启动 TPad Server"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\BaibianController-Server.exe"; Description: "立即启动 TPad Server"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; 卸载时关闭正在运行的服务
-Filename: "{cmd}"; Parameters: "/c taskkill /f /im TPadServer.exe"; Flags: runhidden; RunOnceId: "KillProcess"
+Filename: "{cmd}"; Parameters: "/c taskkill /f /im BaibianController-Server.exe"; Flags: runhidden; RunOnceId: "KillProcess"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
