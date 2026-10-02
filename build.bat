@@ -41,7 +41,7 @@ if exist dist rmdir /s /q dist
 
 REM 打包
 echo [4/4] 正在打包，请稍候...
-pyinstaller TPadServer.spec --noconfirm
+python -m PyInstaller TPadServer.spec --noconfirm
 if errorlevel 1 (
     echo [错误] 打包失败
     pause
@@ -52,7 +52,7 @@ echo.
 echo ========================================
 echo   打包成功!
 echo ========================================
-echo 生成的文件: dist\TPadServer.exe
+echo 生成的文件: dist\百变控制器服务端.exe
 echo.
 
 REM 检查 Inno Setup 是否安装
