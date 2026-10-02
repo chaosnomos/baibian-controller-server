@@ -1,6 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-# TPadServer PyInstaller 打包配置
-# 将 Python 脚本和所有依赖打包成单个 exe 文件（无控制台窗口）
 
 block_cipher = None
 
@@ -9,55 +7,27 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('宝剑1.jpg', '.')],
-    hiddenimports=[
-        'pynput.mouse._win32',
-        'pynput.keyboard._win32',
-        'pynput.mouse._dummy',
-        'pynput.keyboard._dummy',
-        'pynput._util.win32',
-        'bleak',
-        'bleak.backends.winrt.client',
-        'bleak.backends.winrt.scanner',
-        'bleak.backends.winrt.service',
-        'bleak.backends.winrt.characteristic',
-        'bleak.backends.winrt.descriptor',
-        'bleak.backends.winrt.manufacturer_data',
-        'winrt.windows.devices.bluetooth',
-        'winrt.windows.devices.bluetooth.advertisement',
-        'winrt.windows.devices.bluetooth.genericattributeprofile',
-        'winrt.windows.devices.enumeration',
-        'winrt.windows.devices.radios',
-        'winrt.windows.foundation',
-        'winrt.windows.foundation.collections',
-        'winrt.windows.storage.streams',
-        'winrt._runtime',
-        'pystray',
-        'pystray._win32',
-        'pystray._base',
-        'pystray._util',
-    ],
+    hiddenimports=['pystray', 'pystray._win32', 'PIL.Image', 'PIL.ImageTk', 'websockets', 'pynput', 'pynput.mouse', 'pynput.keyboard'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        'matplotlib',
-        'numpy',
-        'pytest',
-        'unittest',
-    ],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
     noarchive=False,
-    optimize=0,
 )
 
-pyz = PYZ(a.pure)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
+    a.zipfiles,
     a.datas,
     [],
-    name='百变控制器服务端',
+    name='BaibianController-Server',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -70,5 +40,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
 )

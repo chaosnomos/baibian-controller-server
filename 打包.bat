@@ -53,7 +53,7 @@ REM 清理旧文件
 echo [4/6] 清理旧的打包文件...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
-if exist downloads\百变控制器服务端.exe del /q downloads\百变控制器服务端.exe
+if exist downloads\BaibianController-Server.exe del /q downloads\BaibianController-Server.exe
 echo   已清理
 echo.
 
@@ -75,23 +75,23 @@ echo.
 REM 复制到 downloads 目录
 echo [6/6] 复制输出文件...
 if not exist downloads mkdir downloads
-copy /y dist\百变控制器服务端.exe downloads\百变控制器服务端.exe >nul
+copy /y dist\BaibianController-Server.exe downloads\BaibianController-Server.exe >nul
 if errorlevel 1 (
     echo [错误] 复制失败
     pause
     exit /b 1
 )
-echo   已复制到 downloads\百变控制器服务端.exe
+echo   已复制到 downloads\BaibianController-Server.exe
 echo.
 
 echo ========================================
 echo   打包成功!
 echo ========================================
 echo.
-echo 输出文件: downloads\百变控制器服务端.exe
+echo 输出文件: downloads\BaibianController-Server.exe
 echo.
 echo 使用方法:
-echo   双击 百变控制器服务端.exe 启动（无 CMD 窗口）
+echo   双击 BaibianController-Server.exe 启动（无 CMD 窗口）
 echo.
 echo 以后打包只需双击本脚本即可
 echo.
