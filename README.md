@@ -66,7 +66,7 @@
 3. 编译完成后，exe 文件位于 `downloads/` 目录下：
    ```
    downloads/
-   └── 百变控制器服务端.exe
+   └── BaibianController-Server.exe
    ```
 
 ### 方式二：手动编译（Windows）
@@ -80,7 +80,7 @@ pip install pyinstaller
 python -m PyInstaller TPadServer.spec --noconfirm
 ```
 
-生成的 exe 在 `dist/百变控制器服务端.exe`。
+生成的 exe 在 `dist/BaibianController-Server.exe`。
 
 ### 方式三：Linux
 
@@ -107,7 +107,7 @@ chmod +x build_macos.sh
 
 ## 运行
 
-编译完成后，双击 `downloads/百变控制器服务端.exe` 即可运行。
+编译完成后，双击 `downloads/BaibianController-Server.exe` 即可运行。
 
 程序启动后会显示：
 - **IP 地址**：电脑在局域网中的 IP
@@ -136,7 +136,7 @@ chmod +x build_macos.sh
 
 下载后可用以下命令验证文件完整性（防篡改）：
 ```powershell
-Get-FileHash .\百变控制器服务端.exe -Algorithm SHA256
+Get-FileHash .\BaibianController-Server.exe -Algorithm SHA256
 ```
 
 **SHA256（V1.4.1）：**
@@ -148,7 +148,7 @@ E48327E6E34C44A9CB97E6DC9AD34AFF3C7B1DC6E7D286F7D6CD4217B26792B2
 
 如果需要生成 Windows 安装包（带卸载程序、桌面快捷方式等）：
 
-1. 先完成上述编译步骤，确保 `dist/百变控制器服务端.exe` 存在
+1. 先完成上述编译步骤，确保 `dist/BaibianController-Server.exe` 存在
 2. 安装 [Inno Setup 6](https://jrsoftware.org/isdl.php)
 3. 运行：
    ```bash
