@@ -7,7 +7,7 @@ TPad Server - 笔记本端控制服务器
     - pynput: 键盘鼠标控制
 """
 
-APP_VERSION = "V1.3.0"
+APP_VERSION = "V1.4.1"
 
 import asyncio
 import websockets
@@ -31,6 +31,14 @@ try:
 except ImportError:
     BLE_AVAILABLE = False
     BLE_LOG_FILE = None
+
+# 系统托盘
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    TRAY_AVAILABLE = True
+except ImportError:
+    TRAY_AVAILABLE = False
 
 # 应用所在目录（打包后为 exe 所在目录，开发模式为脚本所在目录）
 if getattr(sys, 'frozen', False):
@@ -94,8 +102,13 @@ IDLE_TIMEOUT_OPTIONS = [1, 2, 3, 5, 10, 20, 30, 60]
 pair_code = ''
 PAIR_CODE_LENGTH = 4
 
+# 绑定用户列表（持久化保存）：[{name, code}]
+bound_users = []
+
 # 全局状态
 connected_clients = 0
+current_conn_is_bound = False  # 当前连接是否来自绑定用户
+current_conn_code = ''         # 当前连接使用的连接码
 server_running = False
 server_thread = None
 ws_server = None
@@ -112,9 +125,16 @@ sword_cursor_window = None       # SwordCursorOverlay 实例
 
 
 def generate_pair_code():
-    """生成随机4位数字连接码"""
+    """生成随机4位数字连接码（避让已绑定的连接码）"""
     global pair_code
-    pair_code = ''.join([str(random.randint(0, 9)) for _ in range(PAIR_CODE_LENGTH)])
+    bound_codes = {u['code'] for u in bound_users}
+    for _ in range(100):
+        code = ''.join([str(random.randint(0, 9)) for _ in range(PAIR_CODE_LENGTH)])
+        if code not in bound_codes:
+            pair_code = code
+            break
+    else:
+        pair_code = ''.join([str(random.randint(0, 9)) for _ in range(PAIR_CODE_LENGTH)])
     print(f'[配对] 新连接码: {pair_code}')
     if gui_callbacks and 'on_pair_code_update' in gui_callbacks:
         gui_callbacks['on_pair_code_update'](pair_code)
@@ -712,9 +732,11 @@ async def heartbeat(websocket, last_msg_time):
 
 async def handle_connection(websocket):
     """处理WebSocket连接"""
-    global connected_clients, pair_code
+    global connected_clients, pair_code, current_conn_is_bound, current_conn_code
     client_addr = websocket.remote_address
     client_ip = client_addr[0] if client_addr else '未知'
+    is_bound = False
+    received_code = ''
 
     # 连接码验证：等待客户端发送配对码
     try:
@@ -727,19 +749,25 @@ async def handle_connection(websocket):
             return
         
         received_code = auth_message[5:]  # 去掉 'PAIR|' 前缀
-        
-        if received_code != pair_code:
+
+        # 校验顺序：1.绑定用户码（固定） 2.动态连接码（一次性）
+        is_bound = any(u['code'] == received_code for u in bound_users)
+        if not is_bound and received_code != pair_code:
             await websocket.send(f'AUTH_FAIL|连接码错误')
             print(f'[配对] 客户端 {client_ip} 连接码错误: {received_code} (正确: {pair_code})')
             await websocket.close()
             return
-        
+
         # 验证通过
-        await websocket.send('AUTH_OK|配对成功')
-        print(f'[配对] 客户端 {client_ip} 配对成功')
-        
-        # 配对成功后生成新的连接码（防止重复连接）
-        generate_pair_code()
+        if is_bound:
+            await websocket.send('AUTH_OK|配对成功')
+            print(f'[配对] 客户端 {client_ip} 通过绑定码配对成功')
+            # 绑定码连接不刷新动态码
+        else:
+            await websocket.send('AUTH_OK|配对成功')
+            print(f'[配对] 客户端 {client_ip} 配对成功')
+            # 动态码连接成功后刷新（防止重复使用）
+            generate_pair_code()
         
     except asyncio.TimeoutError:
         await websocket.send('AUTH_FAIL|配对超时')
@@ -758,9 +786,11 @@ async def handle_connection(websocket):
         return
 
     connected_clients += 1
+    current_conn_is_bound = is_bound
+    current_conn_code = received_code
 
     if gui_callbacks:
-        gui_callbacks['on_client_connect'](client_ip, connected_clients)
+        gui_callbacks['on_client_connect'](client_ip, connected_clients, is_bound, received_code)
 
     last_msg_time = [time.time()]
     heartbeat_task = None
@@ -818,6 +848,9 @@ async def handle_connection(websocket):
             except Exception:
                 pass
         connected_clients -= 1
+        if connected_clients == 0:
+            current_conn_is_bound = False
+            current_conn_code = ''
         if gui_callbacks:
             gui_callbacks['on_client_disconnect'](connected_clients)
 
@@ -1101,6 +1134,211 @@ class SwordCursorOverlay:
                 self.window.geometry(f'{self.img_w}x{self.img_h}')
 
 
+class UserManagerWindow:
+    """绑定用户管理窗口：列表可点击填充，保存按名称判断新增/覆盖"""
+
+    def __init__(self, master, save_callback, prefill_code=''):
+        self.save_callback = save_callback
+        self.window = tk.Toplevel(master)
+        self.window.title("绑定用户管理")
+        self.window.geometry("380x480")
+        self.window.resizable(False, False)
+        self.window.configure(bg='#f0f0f0')
+        self.window.transient(master)
+        self.window.grab_set()
+
+        self._build_ui()
+        # 预填连接码（来自"保存当前连接"）
+        if prefill_code:
+            self.code_entry.insert(0, prefill_code)
+            self.name_entry.focus_set()
+        self._refresh_list()
+
+    def _build_ui(self):
+        # 列表区
+        list_frame = tk.Frame(self.window, bg='#f0f0f0')
+        list_frame.pack(fill='both', expand=True, padx=15, pady=(15, 5))
+
+        tk.Label(list_frame, text="已绑定用户", font=('微软雅黑', 11, 'bold'),
+                 fg='#2c3e50', bg='#f0f0f0').pack(anchor='w')
+
+        # 表头
+        header = tk.Frame(list_frame, bg='#ecf0f1')
+        header.pack(fill='x', pady=(6, 0))
+        tk.Label(header, text="名称", font=('微软雅黑', 9, 'bold'), fg='#7f8c8d',
+                 bg='#ecf0f1', width=14, anchor='w').pack(side='left', padx=(8, 0))
+        tk.Label(header, text="连接码", font=('微软雅黑', 9, 'bold'), fg='#7f8c8d',
+                 bg='#ecf0f1', width=8, anchor='w').pack(side='left')
+        tk.Label(header, text="操作", font=('微软雅黑', 9, 'bold'), fg='#7f8c8d',
+                 bg='#ecf0f1', width=6, anchor='center').pack(side='right', padx=(0, 8))
+
+        # 可滚动列表
+        list_container = tk.Frame(list_frame, bg='white')
+        list_container.pack(fill='both', expand=True, pady=(4, 0))
+
+        self.list_canvas = tk.Canvas(list_container, bg='white', highlightthickness=0, height=180)
+        list_scrollbar = ttk.Scrollbar(list_container, orient='vertical', command=self.list_canvas.yview)
+        self.list_inner = tk.Frame(self.list_canvas, bg='white')
+
+        self.list_inner.bind(
+            '<Configure>',
+            lambda e: self.list_canvas.configure(scrollregion=self.list_canvas.bbox('all'))
+        )
+        self.list_canvas.create_window((0, 0), window=self.list_inner, anchor='nw')
+        self.list_canvas.configure(yscrollcommand=list_scrollbar.set)
+
+        self.list_canvas.pack(side='left', fill='both', expand=True)
+        list_scrollbar.pack(side='right', fill='y')
+
+        # 表单区
+        form_frame = tk.Frame(self.window, bg='#f0f0f0')
+        form_frame.pack(fill='x', padx=15, pady=(10, 5))
+
+        tk.Label(form_frame, text="用户信息", font=('微软雅黑', 11, 'bold'),
+                 fg='#2c3e50', bg='#f0f0f0').pack(anchor='w')
+
+        name_row = tk.Frame(form_frame, bg='#f0f0f0')
+        name_row.pack(fill='x', pady=(8, 4))
+        tk.Label(name_row, text="名称：", font=('微软雅黑', 10), fg='#7f8c8d',
+                 bg='#f0f0f0', width=7, anchor='w').pack(side='left')
+        self.name_entry = tk.Entry(name_row, font=('微软雅黑', 11), width=24)
+        self.name_entry.pack(side='left', fill='x', expand=True)
+
+        code_row = tk.Frame(form_frame, bg='#f0f0f0')
+        code_row.pack(fill='x', pady=4)
+        tk.Label(code_row, text="连接码：", font=('微软雅黑', 10), fg='#7f8c8d',
+                 bg='#f0f0f0', width=7, anchor='w').pack(side='left')
+        self.code_entry = tk.Entry(code_row, font=('Consolas', 13, 'bold'), width=8)
+        self.code_entry.pack(side='left')
+        self.gen_btn = tk.Button(
+            code_row, text="🎲 随机", font=('微软雅黑', 9),
+            fg='#3498db', bg='white', relief='flat', cursor='hand2',
+            command=self._gen_random_code
+        )
+        self.gen_btn.pack(side='left', padx=(6, 0))
+
+        # 按钮区
+        btn_frame = tk.Frame(self.window, bg='#f0f0f0')
+        btn_frame.pack(fill='x', padx=15, pady=(5, 15))
+
+        self.new_btn = tk.Button(
+            btn_frame, text="新建", font=('微软雅黑', 10),
+            fg='#7f8c8d', bg='white', relief='solid', bd=1, cursor='hand2',
+            command=self._clear_form
+        )
+        self.new_btn.pack(side='left', ipadx=15)
+
+        self.save_btn = tk.Button(
+            btn_frame, text="保存", font=('微软雅黑', 10, 'bold'),
+            fg='white', bg='#27ae60', relief='flat', cursor='hand2',
+            command=self._save
+        )
+        self.save_btn.pack(side='right', ipadx=20)
+
+    def _gen_random_code(self):
+        """生成不重复的4位随机连接码"""
+        global bound_users
+        existing = {u['code'] for u in bound_users}
+        for _ in range(100):
+            code = ''.join([str(random.randint(0, 9)) for _ in range(PAIR_CODE_LENGTH)])
+            if code not in existing:
+                self.code_entry.delete(0, tk.END)
+                self.code_entry.insert(0, code)
+                return
+        self.code_entry.delete(0, tk.END)
+        self.code_entry.insert(0, '0000')
+
+    def _clear_form(self):
+        """清空表单"""
+        self.name_entry.delete(0, tk.END)
+        self.code_entry.delete(0, tk.END)
+
+    def _fill_form(self, name, code):
+        """点击列表项时填充表单"""
+        self.name_entry.delete(0, tk.END)
+        self.name_entry.insert(0, name)
+        self.code_entry.delete(0, tk.END)
+        self.code_entry.insert(0, code)
+
+    def _refresh_list(self):
+        """刷新用户列表"""
+        global bound_users
+        for w in self.list_inner.winfo_children():
+            w.destroy()
+
+        if not bound_users:
+            tk.Label(self.list_inner, text="暂无绑定用户", font=('微软雅黑', 10),
+                     fg='#bdc3c7', bg='white').pack(pady=20)
+            return
+
+        for idx, user in enumerate(bound_users):
+            row = tk.Frame(self.list_inner, bg='white')
+            row.pack(fill='x', padx=4, pady=2)
+            row.bind('<Button-1>', lambda e, n=user['name'], c=user['code']: self._fill_form(n, c))
+
+            name_lbl = tk.Label(row, text=user['name'], font=('微软雅黑', 10),
+                                fg='#2c3e50', bg='white', width=14, anchor='w', cursor='hand2')
+            name_lbl.pack(side='left', padx=(4, 0))
+            name_lbl.bind('<Button-1>', lambda e, n=user['name'], c=user['code']: self._fill_form(n, c))
+
+            code_lbl = tk.Label(row, text=user['code'], font=('Consolas', 12, 'bold'),
+                                fg='#e74c3c', bg='white', width=8, anchor='w', cursor='hand2')
+            code_lbl.pack(side='left')
+            code_lbl.bind('<Button-1>', lambda e, n=user['name'], c=user['code']: self._fill_form(n, c))
+
+            del_btn = tk.Button(
+                row, text="删除", font=('微软雅黑', 9),
+                fg='#e74c3c', bg='white', relief='flat', cursor='hand2',
+                command=lambda i=idx: self._delete_user(i)
+            )
+            del_btn.pack(side='right', padx=(0, 4))
+
+    def _delete_user(self, index):
+        """删除指定用户"""
+        global bound_users
+        if messagebox.askyesno("确认删除", f"确定删除用户「{bound_users[index]['name']}」吗？"):
+            del bound_users[index]
+            self._refresh_list()
+            self.save_callback()
+
+    def _save(self):
+        """保存：名称不存在则新增，存在则确认覆盖"""
+        global bound_users
+        name = self.name_entry.get().strip()
+        code = self.code_entry.get().strip()
+
+        if not name:
+            messagebox.showwarning("提示", "请输入名称")
+            return
+        if not code or len(code) != 4 or not code.isdigit():
+            messagebox.showwarning("提示", "连接码需为4位数字")
+            return
+
+        # 检查连接码是否与其他用户重复
+        for u in bound_users:
+            if u['code'] == code and u['name'] != name:
+                messagebox.showwarning("提示", f"连接码 {code} 已被用户「{u['name']}」使用，请更换")
+                return
+
+        # 按名称查重
+        existing_idx = None
+        for i, u in enumerate(bound_users):
+            if u['name'] == name:
+                existing_idx = i
+                break
+
+        if existing_idx is not None:
+            if not messagebox.askyesno("确认覆盖", f"用户「{name}」已存在，是否覆盖其连接码？"):
+                return
+            bound_users[existing_idx]['code'] = code
+        else:
+            bound_users.append({'name': name, 'code': code})
+
+        self._refresh_list()
+        self.save_callback()
+        messagebox.showinfo("成功", "保存成功")
+
+
 class TPadServerGUI:
     """TPad Server GUI界面"""
 
@@ -1134,6 +1372,7 @@ class TPadServerGUI:
 
         self.ble_peripheral = None
         self.ble_advertising = False
+        self.tray_icon = None  # 系统托盘图标
 
         self.build_ui()
 
@@ -1212,6 +1451,14 @@ class TPadServerGUI:
         )
         self.auto_start_cb.pack(side='right')
 
+        # 最小化到托盘按钮
+        self.tray_btn = tk.Button(
+            self.status_frame, text="🔽 后台运行",
+            font=('微软雅黑', 9), fg='#3498db', bg='#f0f0f0',
+            relief='flat', cursor='hand2', command=self.minimize_to_tray
+        )
+        self.tray_btn.pack(side='right', padx=(0, 10))
+
         # 信息卡片
         info_frame = tk.Frame(self.root, bg='white', relief='solid', bd=1)
         info_frame.pack(fill='x', padx=30, pady=6)
@@ -1237,10 +1484,22 @@ class TPadServerGUI:
         self.pair_code_label = tk.Label(pair_row, text="----", font=('Consolas', 24, 'bold'), fg='#e74c3c', bg='white')
         self.pair_code_label.pack(side='right')
         
-        # 刷新连接码按钮
+        # 刷新连接码 + 管理用户 按钮
         refresh_row = tk.Frame(info_frame, bg='white')
         refresh_row.pack(fill='x', padx=20, pady=(0, 5))
         tk.Label(refresh_row, text="", font=('微软雅黑', 10), bg='white', width=8).pack(side='left')
+        self.manage_users_btn = tk.Button(
+            refresh_row, text="👥 管理用户",
+            font=('微软雅黑', 9), fg='#9b59b6', bg='white',
+            relief='flat', cursor='hand2', command=self.open_user_manager
+        )
+        self.manage_users_btn.pack(side='right', padx=(0, 8))
+        self.save_conn_btn = tk.Button(
+            refresh_row, text="💾 保存当前连接",
+            font=('微软雅黑', 9), fg='#27ae60', bg='white',
+            relief='flat', cursor='hand2', command=self.save_current_connection
+        )
+        # 初始隐藏，仅在非绑定用户连接时显示
         self.refresh_btn = tk.Button(
             refresh_row, text="🔄 刷新连接码",
             font=('微软雅黑', 9), fg='#3498db', bg='white',
@@ -1520,15 +1779,20 @@ class TPadServerGUI:
         self.wifi_status_label.config(text="未启动", fg='#bdc3c7')
         self.wifi_toggle_btn.config(text="启动服务", fg='#27ae60')
 
-    def on_client_connect(self, client_ip, count):
+    def on_client_connect(self, client_ip, count, is_bound, code):
         """客户端连接回调（子线程调用）"""
-        self.root.after(0, lambda: self._update_client_connect(client_ip, count))
+        self.root.after(0, lambda: self._update_client_connect(client_ip, count, is_bound, code))
 
-    def _update_client_connect(self, client_ip, count):
+    def _update_client_connect(self, client_ip, count, is_bound, code):
         """更新客户端连接UI"""
         self.conn_label.config(text=f"{count} 台设备", fg='#27ae60')
         self.pair_code_label.config(text="••••", fg='#bdc3c7')
         self.refresh_btn.config(state='disabled')
+        # 非绑定用户连接时显示"保存当前连接"按钮
+        if not is_bound:
+            self.save_conn_btn.pack(side='right', padx=(0, 8))
+        else:
+            self.save_conn_btn.pack_forget()
 
     def on_client_disconnect(self, count):
         """客户端断开回调（子线程调用）"""
@@ -1536,6 +1800,7 @@ class TPadServerGUI:
 
     def _update_client_disconnect(self, count):
         """更新客户端断开UI"""
+        self.save_conn_btn.pack_forget()
         if count > 0:
             self.conn_label.config(text=f"{count} 台设备", fg='#27ae60')
         else:
@@ -1573,6 +1838,18 @@ class TPadServerGUI:
     def refresh_pair_code(self):
         """手动刷新连接码"""
         generate_pair_code()
+
+    def open_user_manager(self, prefill_code=''):
+        """打开绑定用户管理窗口，prefill_code 为预填的连接码"""
+        UserManagerWindow(self.root, self._save_config, prefill_code=prefill_code)
+
+    def save_current_connection(self):
+        """保存当前连接：打开用户管理窗口并预填当前连接码"""
+        global current_conn_code
+        if current_conn_code:
+            self.open_user_manager(prefill_code=current_conn_code)
+        else:
+            messagebox.showinfo('提示', '当前无连接信息可保存')
 
     def on_pair_code_update(self, code):
         """连接码更新回调（子线程调用）"""
@@ -1656,6 +1933,7 @@ class TPadServerGUI:
     def _save_config(self):
         """保存用户偏好到 server_config.json"""
         try:
+            global bound_users
             config = {}
             if os.path.exists(CONFIG_PATH):
                 with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -1667,6 +1945,8 @@ class TPadServerGUI:
                 'rgb': list(self._sword_color_rgb),  # [R, G, B] 数组
                 'custom_rgb': list(self._sword_custom_color) if self._sword_custom_color else None,
             }
+            # 保存绑定用户
+            config['bound_users'] = bound_users
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -1675,6 +1955,7 @@ class TPadServerGUI:
     def _load_config(self):
         """从 server_config.json 加载用户偏好（启动时调用）"""
         try:
+            global bound_users
             if not os.path.exists(CONFIG_PATH):
                 return
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -1692,6 +1973,9 @@ class TPadServerGUI:
             self.sword_color_var.set(color_name)
             self._sword_color_rgb = color_rgb
             self.sword_color_btn.config(bg=self._rgb_to_hex(color_rgb))
+
+            # 加载绑定用户
+            bound_users = config.get('bound_users', [])
         except Exception as e:
             log(f'[配置] 加载失败: {e}')
 
@@ -1961,8 +2245,79 @@ class TPadServerGUI:
             elif cmd_type == 'REBOOT':
                 handle_reboot_command(cmd_type, data)
 
+    def _create_tray_image(self):
+        """生成托盘图标（紫色背景+白色B字）"""
+        img = Image.new('RGB', (64, 64), color=(44, 62, 80))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([8, 8, 56, 56], fill=(155, 89, 182))
+        draw.text((22, 14), 'B', fill='white')
+        return img
+
+    def minimize_to_tray(self):
+        """最小化到系统托盘"""
+        if not TRAY_AVAILABLE:
+            messagebox.showinfo('提示', '系统托盘功能不可用（缺少 pystray 库）')
+            return
+        if self.tray_icon is not None:
+            return
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem('显示主窗口', self._tray_restore, default=True),
+                pystray.MenuItem('退出程序', self._tray_quit)
+            )
+            self.tray_icon = pystray.Icon(
+                'baibian_controller',
+                self._create_tray_image(),
+                '百变控制器服务端',
+                menu
+            )
+            # pystray.run() 会阻塞，放到子线程
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            self.root.withdraw()  # 隐藏主窗口
+        except Exception as e:
+            log(f'[托盘] 启动失败: {e}')
+            messagebox.showerror('错误', f'最小化到托盘失败:\n{e}')
+            self.tray_icon = None
+
+    def _tray_restore(self, icon=None, item=None):
+        """从托盘恢复主窗口"""
+        self.root.after(0, self.restore_from_tray)
+
+    def restore_from_tray(self):
+        """恢复主窗口并停止托盘图标"""
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_quit(self, icon=None, item=None):
+        """从托盘菜单退出程序"""
+        self.root.after(0, self._quit_from_tray)
+
+    def _quit_from_tray(self):
+        """执行退出（由托盘菜单触发）"""
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
+        self.on_close()
+
     def on_close(self):
         """关闭窗口"""
+        # 停止托盘图标
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
         # 先销毁宝剑光标窗口
         global sword_cursor_window, double_mouse_enabled
         double_mouse_enabled = False
