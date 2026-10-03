@@ -1791,8 +1791,18 @@ class TPadServerGUI:
         # 非绑定用户连接时显示"保存当前连接"按钮
         if not is_bound:
             self.save_conn_btn.pack(side='right', padx=(0, 8))
+            # 提示是否绑定当前连接
+            self.root.after(50, lambda: self._prompt_bind_current(code))
         else:
             self.save_conn_btn.pack_forget()
+
+    def _prompt_bind_current(self, code):
+        """提示是否将当前连接绑定为常用用户"""
+        if messagebox.askyesno(
+            "绑定当前连接",
+            f"检测到非绑定设备连接（连接码：{code}），\n是否将其绑定为常用用户？"
+        ):
+            self.open_user_manager(prefill_code=code)
 
     def on_client_disconnect(self, count):
         """客户端断开回调（子线程调用）"""
