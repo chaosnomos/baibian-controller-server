@@ -132,7 +132,7 @@ chmod +x build_macos.sh
 
 不想自己编译的用户，可以直接下载预编译版本：
 
-- [V1.4.1 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/V1.4.1)
+- [V1.4.2 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/V1.4.2)
 
 下载后可用以下命令验证文件完整性（防篡改）：
 ```powershell
