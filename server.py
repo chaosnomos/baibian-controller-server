@@ -7,7 +7,7 @@ TPad Server - 笔记本端控制服务器
     - pynput: 键盘鼠标控制
 """
 
-APP_VERSION = "V1.4.1"
+APP_VERSION = "V1.4.2"
 
 import asyncio
 import websockets
@@ -1336,7 +1336,6 @@ class UserManagerWindow:
 
         self._refresh_list()
         self.save_callback()
-        messagebox.showinfo("成功", "保存成功")
 
 
 class TPadServerGUI:
