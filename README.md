@@ -23,7 +23,7 @@
 | 🎮 游戏手柄 | 摇杆、按键映射 |
 | 🪄 变身棒 | 上传变身图片，远程显示特效 |
 | 🔴 远程关机 | 一键关机 / 重启 |
-| 📶 WiFi 连接 | 同一局域网下通过 WebSocket 连接 |
+| 📶 WiFi 连接 | 手机与电脑在同一网络（同一 WiFi，或同一路由器下的有线） |
 | 📡 蓝牙连接 | 通过 BLE GATT 服务连接 |
 | 👥 绑定用户 | 管理已绑定手机，固定连接码免重复输入 |
 | 🔽 系统托盘 | 最小化到后台运行，右下角托盘图标控制 |
@@ -110,6 +110,7 @@ chmod +x build_macos.sh
 编译完成后，双击 `downloads/BaibianController-Server.exe` 即可运行。
 
 程序启动后会显示：
+- **当前网络**：无线连接显示 WiFi 名称，有线连接显示 Windows 网络配置文件名称
 - **IP 地址**：电脑在局域网中的 IP
 - **端口**：默认 8765
 - **连接码**：4 位随机数字，用于小程序配对
@@ -132,11 +133,16 @@ chmod +x build_macos.sh
 
 不想自己编译的用户，可以直接下载预编译版本：
 
-- [下载](https://github.com/chaosnomos/baibian-controller-server/releases)
+- [V1.4.3 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/v1.4.3)
+- [全部版本](https://github.com/chaosnomos/baibian-controller-server/releases)
 
 下载后可用以下命令验证文件完整性（防篡改）：
 ```powershell
 Get-FileHash .\BaibianController-Server.exe -Algorithm SHA256
+```
+**SHA256（V1.4.3）：**
+```
+70760B23F337808ACB38581F79105496E70AAC4FEF0F1DB9871986093D87AB10
 ```
 **SHA256（V1.4.2）：**
 ```

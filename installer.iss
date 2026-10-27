@@ -4,7 +4,7 @@
 
 [Setup]
 AppName=TPad Server
-AppVersion=1.4.1
+AppVersion=1.4.3
 AppPublisher=TPad
 AppPublisherURL=https://github.com/chaosnomos/baibian-controller-server
 AppDescription=TPad 蓝牙/WiFi 远程控制服务器

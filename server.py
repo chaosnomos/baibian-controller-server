@@ -7,7 +7,7 @@ TPad Server - 笔记本端控制服务器
     - pynput: 键盘鼠标控制
 """
 
-APP_VERSION = "V1.4.2"
+APP_VERSION = "V1.4.3"
 
 import asyncio
 import websockets
@@ -18,6 +18,7 @@ import threading
 import os
 import sys
 import random
+import subprocess
 import tkinter as tk
 from tkinter import ttk, font, messagebox, colorchooser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -349,6 +350,70 @@ def get_local_ip():
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def _decode_console(raw):
+    """解码命令行输出（Windows 控制台可能是 GBK 或 UTF-8）"""
+    for enc in ('utf-8', 'gbk', 'mbcs'):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return ''
+
+
+def get_wifi_name():
+    """获取当前连接的WiFi名称(SSID)，非Windows或未连接WiFi时返回None"""
+    if os.name != 'nt':
+        return None
+    try:
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        result = subprocess.run(
+            ['netsh', 'wlan', 'show', 'interfaces'],
+            capture_output=True, timeout=5,
+            stdin=subprocess.DEVNULL, creationflags=creationflags
+        )
+        text = _decode_console(result.stdout or b'')
+        for line in text.splitlines():
+            line = line.strip()
+            # 只取 SSID 行，排除 BSSID
+            if line.startswith('SSID') and not line.startswith('BSSID'):
+                ssid = line.partition(':')[2].strip()
+                if ssid:
+                    return ssid
+    except Exception:
+        pass
+    return None
+
+
+def get_network_profile_name():
+    """获取Windows当前网络连接名称（有线时即网络配置文件名称）"""
+    if os.name != 'nt':
+        return None
+    try:
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        script = (
+            "$p = Get-NetConnectionProfile | "
+            "Where-Object { $_.IPv4Connectivity -eq 'Internet' } | Select-Object -First 1; "
+            "if (-not $p) { $p = Get-NetConnectionProfile | Select-Object -First 1 }; "
+            "$p.Name"
+        )
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
+            capture_output=True, timeout=8,
+            stdin=subprocess.DEVNULL, creationflags=creationflags
+        )
+        name = _decode_console(result.stdout or b'').strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    return None
+
+
+def get_network_name():
+    """获取当前网络名称：无线取WiFi名，有线取Windows网络配置文件名称"""
+    return get_wifi_name() or get_network_profile_name()
 
 
 def parse_command(message):
@@ -1462,9 +1527,16 @@ class TPadServerGUI:
         info_frame = tk.Frame(self.root, bg='white', relief='solid', bd=1)
         info_frame.pack(fill='x', padx=30, pady=6)
 
+        # 当前网络
+        wifi_row = tk.Frame(info_frame, bg='white')
+        wifi_row.pack(fill='x', padx=20, pady=(10, 5))
+        tk.Label(wifi_row, text="当前网络", font=('微软雅黑', 10), fg='#95a5a6', bg='white', width=8, anchor='w').pack(side='left')
+        self.wifi_label = tk.Label(wifi_row, text="获取中...", font=('Consolas', 13, 'bold'), fg='#2c3e50', bg='white')
+        self.wifi_label.pack(side='right')
+
         # IP地址
         ip_row = tk.Frame(info_frame, bg='white')
-        ip_row.pack(fill='x', padx=20, pady=(10, 5))
+        ip_row.pack(fill='x', padx=20, pady=5)
         tk.Label(ip_row, text="IP 地址", font=('微软雅黑', 10), fg='#95a5a6', bg='white', width=8, anchor='w').pack(side='left')
         self.ip_label = tk.Label(ip_row, text="获取中...", font=('Consolas', 15, 'bold'), fg='#2c3e50', bg='white')
         self.ip_label.pack(side='right')
@@ -1599,7 +1671,7 @@ class TPadServerGUI:
         # WiFi服务
         wifi_row = tk.Frame(info_frame, bg='white')
         wifi_row.pack(fill='x', padx=20, pady=(3, 5))
-        tk.Label(wifi_row, text="WiFi", font=('微软雅黑', 10), fg='#95a5a6', bg='white', width=8, anchor='w').pack(side='left')
+        tk.Label(wifi_row, text="📶 WiFi", font=('微软雅黑', 10), fg='#95a5a6', bg='white', width=8, anchor='w').pack(side='left')
         self.wifi_status_label = tk.Label(wifi_row, text="未启动", font=('微软雅黑', 12), fg='#bdc3c7', bg='white')
         self.wifi_status_label.pack(side='left')
         self.wifi_toggle_btn = tk.Button(
@@ -1653,8 +1725,8 @@ class TPadServerGUI:
         tip_canvas.bind('<Leave>', lambda e: tip_canvas.unbind_all('<MouseWheel>'))
 
         tips = [
-            "1. WiFi模式：确保手机和电脑在同一WiFi网络",
-            "2. 点击WiFi右侧的\"启动服务\"按钮开启WiFi",
+            "1. WiFi模式：手机和电脑连同一个 WiFi（电脑用网线时，接同一台路由器也可以）",
+            "2. 点击 📶WiFi 右侧的\"启动服务\"按钮开启服务",
             "3. 在小程序中输入上方IP地址和连接码连接",
             "4. 蓝牙模式：点击蓝牙右侧的\"开启广播\"按钮",
             "5. 在小程序蓝牙页面搜索并连接您的电脑",
@@ -1665,12 +1737,24 @@ class TPadServerGUI:
         ]
         for tip in tips:
             tk.Label(
-                tip_inner, text=tip,
+                tip_inner, text=tip, wraplength=395, justify='left',
                 font=('微软雅黑', 10), fg='#7f8c8d', bg='#f0f0f0', anchor='w'
             ).pack(anchor='w', pady=1)
 
         # 底部间距
         tk.Frame(self.root, bg='#f0f0f0', height=10).pack(fill='x')
+
+        # 首次进入即读取当前网络名称
+        self._refresh_network_label()
+
+    def _refresh_network_label(self):
+        """后台读取当前网络名称并更新界面（查询较慢，避免阻塞主线程）"""
+        def worker():
+            name = get_network_name() or "未联网"
+            if len(name) > 24:
+                name = name[:23] + '…'
+            self.root.after(0, lambda: self.wifi_label.config(text=name))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _check_auto_start(self):
         """检查是否已设置开机自启动"""
@@ -1728,6 +1812,7 @@ class TPadServerGUI:
         ip = get_local_ip()
         port = 8765
 
+        self._refresh_network_label()
         self.ip_label.config(text=ip)
         server_running = True
         
