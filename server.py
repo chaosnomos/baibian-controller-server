@@ -7,17 +7,20 @@ TPad Server - 笔记本端控制服务器
     - pynput: 键盘鼠标控制
 """
 
-APP_VERSION = "V1.4.3"
+APP_VERSION = "V1.5.0"
 
 import asyncio
 import websockets
 import socket
 import json
 import time
+import datetime
 import threading
 import os
 import sys
 import random
+import secrets
+import urllib.parse
 import subprocess
 import tkinter as tk
 from tkinter import ttk, font, messagebox, colorchooser
@@ -40,6 +43,13 @@ try:
     TRAY_AVAILABLE = True
 except ImportError:
     TRAY_AVAILABLE = False
+
+# 二维码生成（扫码连接）
+try:
+    import qrcode
+    QRCODE_AVAILABLE = True
+except ImportError:
+    QRCODE_AVAILABLE = False
 
 # 应用所在目录（打包后为 exe 所在目录，开发模式为脚本所在目录）
 if getattr(sys, 'frozen', False):
@@ -78,12 +88,17 @@ CONFIG_PATH = os.path.join(APP_DIR, 'server_config.json')
 DOWNLOAD_DIR = os.path.join(APP_DIR, 'downloads')
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+_original_print = print
+
+def print(*args, **kwargs):
+    """控制台输出统一加 [HH:MM:SS] 时间前缀（日志文件的格式由 log() 单独处理，不受影响）"""
+    _original_print(f'[{datetime.datetime.now().strftime("%H:%M:%S")}]', *args, **kwargs)
+
 def log(msg):
     """全局日志函数，同时输出到控制台和日志文件"""
     print(msg)
     if BLE_LOG_FILE:
         try:
-            import datetime
             line = f'[{datetime.datetime.now().strftime("%H:%M:%S")}] {msg}'
             with open(BLE_LOG_FILE, 'a', encoding='utf-8') as f:
                 f.write(line + '\n')
@@ -105,6 +120,18 @@ PAIR_CODE_LENGTH = 4
 
 # 绑定用户列表（持久化保存）：[{name, code}]
 bound_users = []
+
+# ============ 扫码连接状态 ============
+QR_TICKET_TTL = 180        # 一次性票据有效期（秒）
+QR_TICKET_KEEP = 4         # 同时保留的有效票据数（当前 + 最近几次，避免换码瞬间扫到旧码失败）
+SESSION_TTL = 1800         # 扫码会话有效期（秒）＝30 分钟，用于断线重连
+SESSION_TTL_MINUTES = SESSION_TTL // 60   # 提示文案用，保持与会话有效期一致
+QR_SCHEME = 'tpad://connect'
+SERVER_SID = secrets.token_hex(4)   # 服务端实例标识（每次启动变化）
+
+tickets = {}        # ticket -> 过期时间戳
+dead_tickets = {}   # 已消费/已过期 ticket -> 时间戳（仅用于给出准确的失败提示）
+sessions = {}       # session -> 过期时间戳
 
 # 全局状态
 connected_clients = 0
@@ -140,6 +167,80 @@ def generate_pair_code():
     if gui_callbacks and 'on_pair_code_update' in gui_callbacks:
         gui_callbacks['on_pair_code_update'](pair_code)
     return pair_code
+
+
+def _prune_tickets():
+    """清理过期票据，并保留最近一批用于给出准确的失败提示"""
+    now = time.time()
+    for token in [t for t, exp in list(tickets.items()) if exp <= now]:
+        tickets.pop(token, None)
+        dead_tickets[token] = now
+    if len(dead_tickets) > 32:
+        for token, _ in sorted(dead_tickets.items(), key=lambda kv: kv[1])[:-32]:
+            dead_tickets.pop(token, None)
+
+
+def new_ticket():
+    """生成一次性扫码票据，返回 (token, 过期时间戳)"""
+    _prune_tickets()
+    token = secrets.token_hex(16)
+    tickets[token] = time.time() + QR_TICKET_TTL
+    # 只保留最近若干个，避免过期票据无限堆积
+    if len(tickets) > QR_TICKET_KEEP:
+        for t, _ in sorted(tickets.items(), key=lambda kv: kv[1])[:len(tickets) - QR_TICKET_KEEP]:
+            tickets.pop(t, None)
+    return token, int(tickets[token])
+
+
+def new_session():
+    """生成扫码会话（用于断线重连）"""
+    now = time.time()
+    for token in [t for t, exp in list(sessions.items()) if exp < now - 3600]:
+        sessions.pop(token, None)
+    token = secrets.token_hex(16)
+    sessions[token] = now + SESSION_TTL
+    return token
+
+
+def clear_qr_state():
+    """服务停止时清空票据与会话"""
+    tickets.clear()
+    dead_tickets.clear()
+    sessions.clear()
+
+
+def get_local_ips():
+    """列出本机私网 IPv4 地址，默认路由地址排在最前"""
+    ips = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    ips = [ip for ip in ips if not ip.startswith('127.')]
+    preferred = get_local_ip()
+    if preferred and not preferred.startswith('127.'):
+        if preferred in ips:
+            ips.remove(preferred)
+        ips.insert(0, preferred)
+    return ips or [preferred]
+
+
+def build_qr_payload(ip, port, ticket, expire_ts):
+    """构造扫码载荷（v1）：tpad://connect?v=1&ip=..&port=..&tk=..&sid=..&exp=..&name=.."""
+    name = (get_network_name() or os.environ.get('COMPUTERNAME') or '')[:24]
+    parts = [
+        'v=1',
+        f'ip={urllib.parse.quote(ip)}',
+        f'port={port}',
+        f'tk={ticket}',
+        f'sid={SERVER_SID}',
+        f'exp={expire_ts}',
+        f'name={urllib.parse.quote(name, safe="")}',
+    ]
+    return QR_SCHEME + '?' + '&'.join(parts)
 
 
 def parse_multipart_file(body, boundary_str):
@@ -802,6 +903,7 @@ async def handle_connection(websocket):
     client_ip = client_addr[0] if client_addr else '未知'
     is_bound = False
     received_code = ''
+    auth_kind = ''  # bound: 绑定码 / pair: 动态码 / ticket: 扫码票据 / session: 扫码会话
 
     # 连接码验证：等待客户端发送配对码
     try:
@@ -814,26 +916,78 @@ async def handle_connection(websocket):
             return
         
         received_code = auth_message[5:]  # 去掉 'PAIR|' 前缀
+        now = time.time()
 
-        # 校验顺序：1.绑定用户码（固定） 2.动态连接码（一次性）
-        is_bound = any(u['code'] == received_code for u in bound_users)
-        if not is_bound and received_code != pair_code:
-            await websocket.send(f'AUTH_FAIL|连接码错误')
-            print(f'[配对] 客户端 {client_ip} 连接码错误: {received_code} (正确: {pair_code})')
+        # 校验顺序：1.扫码会话（断线重连） 2.扫码票据 3.绑定用户码（固定） 4.动态连接码（一次性）
+        if received_code in sessions and sessions[received_code] > now:
+            auth_kind = 'session'
+        elif received_code in tickets and tickets[received_code] > now:
+            auth_kind = 'ticket'
+        elif any(u['code'] == received_code for u in bound_users):
+            auth_kind = 'bound'
+        elif received_code == pair_code:
+            auth_kind = 'pair'
+        else:
+            # 区分失败原因，便于客户端给出准确提示
+            if received_code in dead_tickets or received_code in tickets:
+                reason = '二维码已过期或已失效，请刷新服务端二维码'
+                if connected_clients >= 1:
+                    # 已消费/过期的旧码 + 已有设备连接：直接点明占用原因
+                    reason = '二维码已失效，且已有设备连接，请先断开当前设备后刷新二维码'
+            elif received_code in sessions:
+                reason = f'会话已失效（有效期 {SESSION_TTL_MINUTES} 分钟），请重新扫码'
+            else:
+                reason = '连接码错误'
+            await websocket.send(f'AUTH_FAIL|{reason}')
+            print(f'[配对] 客户端 {client_ip} 鉴权失败: {reason}')
             await websocket.close()
             return
 
-        # 验证通过
-        if is_bound:
-            await websocket.send('AUTH_OK|配对成功')
+        # 仅允许1台设备；已连满时不消费票据，用户断开后仍可扫同一张码
+        if connected_clients >= 1:
+            await websocket.send('AUTH_FAIL|已有设备连接，请稍后再试')
+            await websocket.close()
+            print(f'[配对] 客户端 {client_ip} 被拒绝：已有设备连接')
+            # 有人扫了旧二维码：在服务端给出明确提示（不静默失败）
+            if auth_kind == 'ticket' and gui_callbacks and 'on_qr_busy' in gui_callbacks:
+                try:
+                    gui_callbacks['on_qr_busy'](client_ip)
+                except Exception as exc:
+                    print(f'[扫码] 提示扫码被拒失败: {exc}')
+            return
+
+        # 鉴权通过：票据单次消费、会话续期、动态码轮换
+        if auth_kind == 'ticket':
+            tickets.pop(received_code, None)
+            dead_tickets[received_code] = now
+            session_token = new_session()
+            is_bound = True   # 扫码连接不提供"绑定当前连接"入口
+            print(f'[扫码] 票据已消费: {received_code[:8]}**** (客户端 {client_ip})')
+            print(f'[配对] 客户端 {client_ip} 通过扫码配对成功')
+        elif auth_kind == 'session':
+            sessions[received_code] = now + SESSION_TTL
+            session_token = received_code
+            is_bound = True
+            print(f'[配对] 客户端 {client_ip} 通过扫码会话重连成功')
+        elif auth_kind == 'bound':
+            session_token = new_session()
+            is_bound = True
             print(f'[配对] 客户端 {client_ip} 通过绑定码配对成功')
-            # 绑定码连接不刷新动态码
         else:
-            await websocket.send('AUTH_OK|配对成功')
-            print(f'[配对] 客户端 {client_ip} 配对成功')
+            session_token = new_session()
             # 动态码连接成功后刷新（防止重复使用）
             generate_pair_code()
-        
+            print(f'[配对] 客户端 {client_ip} 配对成功')
+
+        await websocket.send(f'AUTH_OK|配对成功|session={session_token}')
+
+        # 扫码连接成功：票据已消费，自动关闭二维码弹窗（弹窗/托盘唤起共用同一实例）
+        if auth_kind == 'ticket' and gui_callbacks and 'on_scan_connected' in gui_callbacks:
+            try:
+                gui_callbacks['on_scan_connected']()
+            except Exception as exc:
+                print(f'[扫码] 关闭二维码弹窗失败: {exc}')
+
     except asyncio.TimeoutError:
         await websocket.send('AUTH_FAIL|配对超时')
         await websocket.close()
@@ -843,19 +997,13 @@ async def handle_connection(websocket):
         print(f'[配对] 客户端 {client_ip} 连接中断')
         return
 
-    # 检查是否已有设备连接（仅允许1台）
-    if connected_clients >= 1:
-        await websocket.send('AUTH_FAIL|已有设备连接，请稍后再试')
-        await websocket.close()
-        print(f'[配对] 客户端 {client_ip} 被拒绝：已有设备连接')
-        return
-
     connected_clients += 1
     current_conn_is_bound = is_bound
-    current_conn_code = received_code
+    # 扫码/会话连接不展示一次性凭据，避免被误当作可绑定的连接码
+    current_conn_code = received_code if auth_kind in ('bound', 'pair') else ''
 
     if gui_callbacks:
-        gui_callbacks['on_client_connect'](client_ip, connected_clients, is_bound, received_code)
+        gui_callbacks['on_client_connect'](client_ip, connected_clients, is_bound, current_conn_code)
 
     last_msg_time = [time.time()]
     heartbeat_task = None
@@ -1403,6 +1551,178 @@ class UserManagerWindow:
         self.save_callback()
 
 
+class QrConnectWindow:
+    """扫码连接二维码窗口（独立弹窗，不影响主窗口布局）"""
+
+    def __init__(self, master):
+        self.window = tk.Toplevel(master)
+        self.window.title("扫码连接")
+        self.window.geometry("380x560")
+        self.window.resizable(False, False)
+        self.window.configure(bg='white')
+        self.window.transient(master)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+
+        self.photo = None
+        self.expire_ts = 0
+        self.timer_id = None
+        self.busy_until = 0.0
+
+        self._build_ui()
+        self._refresh_qr()
+
+    def _build_ui(self):
+        tk.Label(self.window, text="📱 扫码连接", font=('微软雅黑', 16, 'bold'),
+                 fg='#2c3e50', bg='white').pack(pady=(14, 2))
+        tk.Label(self.window, text="手机与电脑连接同一 WiFi，打开小程序或鸿蒙应用「扫一扫」",
+                 font=('微软雅黑', 9), fg='#7f8c8d', bg='white', wraplength=330).pack(pady=(0, 6))
+
+        self.qr_label = tk.Label(self.window, bg='white')
+        self.qr_label.pack(pady=4)
+
+        addr_row = tk.Frame(self.window, bg='white')
+        addr_row.pack(fill='x', padx=30, pady=(8, 0))
+        tk.Label(addr_row, text="连接地址", font=('微软雅黑', 10), fg='#95a5a6', bg='white').pack(side='left')
+        self.addr_var = tk.StringVar()
+        self.addr_cb = ttk.Combobox(addr_row, textvariable=self.addr_var, state='readonly',
+                                    width=18, font=('Consolas', 10))
+        self.addr_cb.pack(side='right')
+        self.addr_cb.bind('<<ComboboxSelected>>', lambda e: self._refresh_qr())
+
+        self.countdown_label = tk.Label(self.window, text="", font=('微软雅黑', 10),
+                                        fg='#e67e22', bg='white')
+        self.countdown_label.pack(pady=(10, 0))
+
+        self.fallback_label = tk.Label(self.window, text="", font=('Consolas', 10),
+                                       fg='#2c3e50', bg='#f7f7f7')
+        self.fallback_label.pack(fill='x', padx=30, pady=(6, 0), ipady=4)
+
+        btn_row = tk.Frame(self.window, bg='white')
+        btn_row.pack(pady=12)
+        tk.Button(btn_row, text="🔄 刷新二维码", font=('微软雅黑', 10), fg='white', bg='#3498db',
+                  relief='flat', cursor='hand2', command=self._refresh_qr
+                  ).pack(side='left', padx=6, ipadx=8)
+        tk.Button(btn_row, text="关闭", font=('微软雅黑', 10), fg='#7f8c8d', bg='#ecf0f1',
+                  relief='flat', cursor='hand2', command=self.close
+                  ).pack(side='left', padx=6, ipadx=12)
+
+        tk.Label(self.window, text="有效期 3 分钟，仅可使用一次；断线会自动重连",
+                 font=('微软雅黑', 9), fg='#bdc3c7', bg='white'
+                 ).pack(side='bottom', pady=(0, 12))
+
+    def _reload_addresses(self):
+        addrs = get_local_ips()
+        self.addr_cb['values'] = addrs
+        if self.addr_var.get() not in addrs:
+            self.addr_var.set(addrs[0])
+
+    def _refresh_qr(self):
+        """生成新票据并重绘二维码"""
+        from PIL import Image, ImageTk
+
+        self._reload_addresses()
+        ip = self.addr_var.get() or get_local_ip()
+
+        if not server_running:
+            self.photo = None
+            self.qr_label.config(image='', text="服务未启动\n请先在主窗口启动 WiFi 服务",
+                                 font=('微软雅黑', 11), fg='#e74c3c', compound='top')
+            self.countdown_label.config(text='')
+            self.fallback_label.config(text='')
+            self._schedule(1000)
+            return
+
+        if not QRCODE_AVAILABLE:
+            self.photo = None
+            self.qr_label.config(image='', text="缺少 qrcode 库\n请执行 pip install qrcode",
+                                 font=('微软雅黑', 11), fg='#e74c3c', compound='top')
+            self.countdown_label.config(text='')
+            self.fallback_label.config(text='')
+            return
+
+        # 1 对 1 策略：已有设备连接时不再生成可扫二维码，避免"能扫但必然失败"
+        if connected_clients > 0:
+            self.photo = None
+            self.expire_ts = 0
+            self.qr_label.config(image='', text="已有设备连接\n请先在主窗口断开当前设备",
+                                 font=('微软雅黑', 11), fg='#e74c3c', compound='top')
+            self.fallback_label.config(text='')
+            self.show_busy('已有设备连接，无法生成二维码')
+            return
+
+        token, expire_ts = new_ticket()
+        self.expire_ts = expire_ts
+        payload = build_qr_payload(ip, 8765, token, expire_ts)
+        try:
+            qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                               box_size=10, border=2)
+            qr.add_data(payload)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color='#2c3e50', back_color='white')
+            if hasattr(img, 'get_image'):
+                img = img.get_image()
+            img = img.convert('RGB').resize((230, 230), getattr(Image, 'Resampling', Image).NEAREST)
+            self.photo = ImageTk.PhotoImage(img)
+            self.qr_label.config(image=self.photo, text='')
+        except Exception as e:
+            log(f'[二维码] 生成失败: {e}')
+            self.photo = None
+            self.qr_label.config(image='', text=f"二维码生成失败\n{e}",
+                                 font=('微软雅黑', 10), fg='#e74c3c', compound='top')
+
+        # 纯文本备用信息：扫码失败时可直接手动输入
+        self.fallback_label.config(text=f"{ip}:8765    连接码 {pair_code}")
+        self._tick()
+
+    def _tick(self):
+        if not self.window.winfo_exists():
+            return
+        if self.expire_ts <= 0:
+            # 未生成有效二维码（如已有设备连接），不做倒计时
+            self._schedule(1000)
+            return
+        remain = int(self.expire_ts - time.time())
+        if remain <= 20:
+            # 临近过期自动换新码，保证用户随时扫到的都是有效二维码
+            self._refresh_qr()
+            return
+        if time.time() < self.busy_until:
+            # 短暂保留"已有设备连接"等提示，避免被倒计时立刻覆盖
+            self._schedule(1000)
+            return
+        self.countdown_label.config(text=f"二维码剩余有效时间 {remain // 60:02d}:{remain % 60:02d}",
+                                    fg='#e67e22')
+        self._schedule(1000)
+
+    def show_busy(self, message):
+        """在倒计时位置显示临时提示（约 6 秒）"""
+        self.busy_until = time.time() + 6
+        try:
+            self.countdown_label.config(text=message, fg='#e74c3c')
+        except Exception:
+            pass
+
+    def _schedule(self, ms):
+        if self.timer_id:
+            try:
+                self.window.after_cancel(self.timer_id)
+            except Exception:
+                pass
+        self.timer_id = self.window.after(ms, self._tick)
+
+    def close(self):
+        if self.timer_id:
+            try:
+                self.window.after_cancel(self.timer_id)
+            except Exception:
+                pass
+            self.timer_id = None
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+
+
 class TPadServerGUI:
     """TPad Server GUI界面"""
 
@@ -1431,12 +1751,16 @@ class TPadServerGUI:
             'on_show_transform_image': self.on_show_transform_image,
             'on_image_uploaded': self.on_image_uploaded,
             'on_pair_code_update': self.on_pair_code_update,
-            'on_sword_move': self.on_sword_move
+            'on_sword_move': self.on_sword_move,
+            'on_scan_connected': self.on_scan_connected,
+            'on_qr_busy': self.on_qr_busy
         }
 
         self.ble_peripheral = None
         self.ble_advertising = False
         self.tray_icon = None  # 系统托盘图标
+        self.qr_window = None  # 扫码连接弹窗
+        self.qr_entry_enabled = True  # 「显示连接二维码」入口当前是否可用
 
         self.build_ui()
 
@@ -1577,6 +1901,16 @@ class TPadServerGUI:
             relief='flat', cursor='hand2', command=self.refresh_pair_code
         )
         self.refresh_btn.pack(side='right')
+
+        # 扫码连接入口（独立弹窗，避免主窗口按钮溢出）
+        qr_row = tk.Frame(info_frame, bg='white')
+        qr_row.pack(fill='x', padx=20, pady=(2, 8))
+        self.qr_btn = tk.Button(
+            qr_row, text="📱 显示连接二维码（扫码连接）",
+            font=('微软雅黑', 10, 'bold'), fg='white', bg='#3498db',
+            relief='flat', cursor='hand2', command=self.open_qr_window
+        )
+        self.qr_btn.pack(fill='x', ipady=3)
 
         # 分割线
         tk.Frame(info_frame, bg='#ecf0f1', height=1).pack(fill='x', padx=20, pady=3)
@@ -1819,7 +2153,8 @@ class TPadServerGUI:
         # 生成连接码
         generate_pair_code()
         
-        server_thread = threading.Thread(target=server_thread_func, args=(ip, port), daemon=True)
+        # 监听所有网卡，便于多网卡/虚拟网卡环境下手机可达
+        server_thread = threading.Thread(target=server_thread_func, args=('0.0.0.0', port), daemon=True)
         server_thread.start()
 
         # 启动HTTP服务器（用于图片上传）
@@ -1834,6 +2169,9 @@ class TPadServerGUI:
         self.refresh_btn.config(state='normal')
         self.wifi_status_label.config(text="运行中", fg='#27ae60')
         self.wifi_toggle_btn.config(text="停止服务", fg='#e74c3c')
+        # 服务重新启动时没有已连接设备，恢复扫码入口
+        self.qr_entry_enabled = True
+        self._set_qr_entry_enabled(True)
 
     def stop_server(self):
         """停止服务"""
@@ -1854,6 +2192,15 @@ class TPadServerGUI:
         # 停止HTTP服务器
         stop_http_server()
 
+        # 清理扫码状态并关闭二维码弹窗
+        clear_qr_state()
+        if self.qr_window:
+            try:
+                self.qr_window.close()
+            except Exception:
+                pass
+            self.qr_window = None
+
         # 更新UI
         self.status_dot.itemconfig('dot', fill='#e74c3c')
         self.status_label.config(text="  服务已停止", fg='#e74c3c')
@@ -1862,6 +2209,8 @@ class TPadServerGUI:
         self.refresh_btn.config(state='disabled')
         self.wifi_status_label.config(text="未启动", fg='#bdc3c7')
         self.wifi_toggle_btn.config(text="启动服务", fg='#27ae60')
+        # 服务已停止：没有连接中的设备，恢复扫码入口
+        self._set_qr_entry_enabled(True)
 
     def on_client_connect(self, client_ip, count, is_bound, code):
         """客户端连接回调（子线程调用）"""
@@ -1872,6 +2221,9 @@ class TPadServerGUI:
         self.conn_label.config(text=f"{count} 台设备", fg='#27ae60')
         self.pair_code_label.config(text="••••", fg='#bdc3c7')
         self.refresh_btn.config(state='disabled')
+        # 1 对 1 策略：已有设备连接时禁用「显示连接二维码」入口，并关闭已打开的二维码窗口
+        self._set_qr_entry_enabled(False)
+        self._close_qr_window()
         # 非绑定用户连接时显示"保存当前连接"按钮
         if not is_bound:
             self.save_conn_btn.pack(side='right', padx=(0, 8))
@@ -1901,6 +2253,8 @@ class TPadServerGUI:
             self.conn_label.config(text="0 台设备", fg='#bdc3c7')
             self.pair_code_label.config(text=pair_code, fg='#e74c3c')
             self.refresh_btn.config(state='normal')
+            # 设备全部断开：恢复「显示连接二维码」入口
+            self._set_qr_entry_enabled(True)
 
     def on_server_stopped(self):
         """服务停止回调（子线程调用）"""
@@ -1916,6 +2270,8 @@ class TPadServerGUI:
         self.client_list_label.config(text="无", fg='#bdc3c7')
         self.wifi_status_label.config(text="未启动", fg='#bdc3c7')
         self.wifi_toggle_btn.config(text="启动服务", fg='#27ae60')
+        # 服务已停止，没有连接中的设备，恢复扫码入口
+        self._set_qr_entry_enabled(True)
 
     def on_timeout_change(self, event):
         """超时时间变更处理"""
@@ -1936,6 +2292,87 @@ class TPadServerGUI:
     def open_user_manager(self, prefill_code=''):
         """打开绑定用户管理窗口，prefill_code 为预填的连接码"""
         UserManagerWindow(self.root, self._save_config, prefill_code=prefill_code)
+
+    def open_qr_window(self):
+        """打开扫码连接二维码窗口（已打开则复用）"""
+        # 1 对 1 策略：已连接时不生成二维码，避免"能扫但必然失败"
+        if connected_clients > 0:
+            self._close_qr_window()
+            messagebox.showinfo('提示', '已有设备连接。\n请先在主窗口断开当前设备，再显示连接二维码。')
+            print('[扫码] 拒绝打开二维码窗口：已有设备连接')
+            return
+        if self.qr_window and self.qr_window.window.winfo_exists():
+            self.qr_window.window.deiconify()
+            self.qr_window.window.lift()
+            self.qr_window._refresh_qr()
+            return
+        self.qr_window = QrConnectWindow(self.root)
+
+    def _set_qr_entry_enabled(self, enabled):
+        """同步「显示连接二维码」按钮与托盘菜单项可用状态"""
+        self.qr_entry_enabled = enabled
+        try:
+            if enabled:
+                self.qr_btn.config(state='normal', bg='#3498db', fg='white',
+                                   disabledforeground='#95a5a6', cursor='hand2',
+                                   text="📱 显示连接二维码（扫码连接）")
+            else:
+                self.qr_btn.config(state='disabled', bg='#d5dbdb', fg='white',
+                                   disabledforeground='#7f8c8d', cursor='arrow',
+                                   text="📱 显示连接二维码（设备已连接）")
+        except Exception:
+            pass
+        # 托盘菜单项 enabled 为动态判断，状态变化后刷新显示
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.update_menu()
+            except Exception:
+                pass
+        print(f'[扫码] 二维码入口已{"恢复可用" if enabled else "禁用（设备已连接）"}')
+
+    def _qr_entry_is_enabled(self):
+        """供托盘菜单动态判断：已连接时不可用"""
+        return connected_clients == 0
+
+    def _close_qr_window(self):
+        """静默关闭二维码窗口（已关闭则忽略）"""
+        if not self.qr_window:
+            return
+        try:
+            self.qr_window.close()
+        except Exception:
+            pass
+        self.qr_window = None
+
+    def on_qr_busy(self, client_ip):
+        """扫码被拒（已有设备连接）回调（子线程调用）：给出明确提示"""
+        def _notify():
+            msg = f'已有设备连接，拒绝来自 {client_ip} 的扫码请求。请先断开当前设备。'
+            print('[扫码] ' + msg)
+            if self.qr_window and self.qr_window.window.winfo_exists():
+                self.qr_window.show_busy('已有设备连接，扫码被拒绝')
+            else:
+                messagebox.showwarning('扫码被拒绝', msg)
+        try:
+            self.root.after(0, _notify)
+        except Exception:
+            pass
+
+    def on_scan_connected(self):
+        """扫码连接成功回调（子线程调用）：关闭二维码弹窗，避免留下失效二维码"""
+        def _close():
+            if self.qr_window:
+                try:
+                    self.qr_window.close()
+                except Exception:
+                    pass
+                self.qr_window = None
+                print('[扫码] 已自动关闭二维码弹窗')
+
+        try:
+            self.root.after(0, _close)
+        except Exception as exc:
+            print(f'[扫码] 关闭二维码弹窗失败: {exc}')
 
     def save_current_connection(self):
         """保存当前连接：打开用户管理窗口并预填当前连接码"""
@@ -2357,6 +2794,8 @@ class TPadServerGUI:
         try:
             menu = pystray.Menu(
                 pystray.MenuItem('显示主窗口', self._tray_restore, default=True),
+                pystray.MenuItem('显示连接二维码', self._tray_show_qr,
+                                 enabled=lambda item: self._qr_entry_is_enabled()),
                 pystray.MenuItem('退出程序', self._tray_quit)
             )
             self.tray_icon = pystray.Icon(
@@ -2376,6 +2815,18 @@ class TPadServerGUI:
     def _tray_restore(self, icon=None, item=None):
         """从托盘恢复主窗口"""
         self.root.after(0, self.restore_from_tray)
+
+    def _tray_show_qr(self, icon=None, item=None):
+        """从托盘打开扫码连接窗口（已连接时兜底提示）"""
+        def action():
+            self.restore_from_tray()
+            if connected_clients > 0:
+                # 托盘菜单项已置灰，这里兜底处理点击与连接状态变化的竞态
+                messagebox.showinfo('提示', '已有设备连接。\n请先在主窗口断开当前设备，再显示连接二维码。')
+                print('[扫码] 托盘请求被拒绝：已有设备连接')
+                return
+            self.open_qr_window()
+        self.root.after(0, action)
 
     def restore_from_tray(self):
         """恢复主窗口并停止托盘图标"""
