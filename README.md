@@ -133,12 +133,16 @@ chmod +x build_macos.sh
 
 不想自己编译的用户，可以直接下载预编译版本：
 
-- [V1.4.3 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/v1.4.3)
+- [V1.5.0 下载](https://github.com/chaosnomos/baibian-controller-server/releases/tag/v1.5.0)
 - [全部版本](https://github.com/chaosnomos/baibian-controller-server/releases)
 
 下载后可用以下命令验证文件完整性（防篡改）：
 ```powershell
 Get-FileHash .\BaibianController-Server.exe -Algorithm SHA256
+```
+**SHA256（V1.5.0）：**
+```
+DECACD6E85D7A6AC42AE585829E7783B8390EA23BC2058A0B8474B11C7D9A9FE
 ```
 **SHA256（V1.4.3）：**
 ```
